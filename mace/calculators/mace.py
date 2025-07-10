@@ -480,18 +480,22 @@ class MACECalculator(Calculator):
         if self.model_type != "MACE":
             raise NotImplementedError("Only implemented for MACE models")
         batch = self._atoms_to_batch(atoms)
-        global_dDs = [
-            model(
+        global_Ds = []
+        global_dDs = []
+        for model in self.models:
+            results = model(
                 self._clone_batch(batch).to_dict(),
                 compute_global_descriptor_gradient=True,
                 training=self.use_compile,
-            )["global_descriptor_gradient"]
-            for model in self.models
-        ]
+            )
+            global_Ds.append(results["global_descriptor"])
+            global_dDs.append(results["global_descriptor_gradient"])
         global_dDs = [global_dD.detach().cpu().numpy() for global_dD in global_dDs]
+        global_Ds = [global_D.detach().cpu().numpy() for global_dD in global_dDs]
+        
         if self.num_models == 1:
-            return global_dDs[0]
-        return global_dDs
+            return global_Ds[0],global_dDs[0]
+        return global_dD,global_dDs
 
     def get_descriptors(self, atoms=None, invariants_only=True, num_layers=-1):
         """Extracts the descriptors from MACE model.
