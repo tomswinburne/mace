@@ -220,7 +220,7 @@ def get_outputs(
             compute_forces(
                 energy=D,
                 positions=positions,
-                training=(training or compute_hessian or compute_edge_forces),
+                training=True,
             ) for D in global_descriptor ]
         global_descriptor_gradient = \
             torch.stack(global_descriptor_gradient, dim=0)
