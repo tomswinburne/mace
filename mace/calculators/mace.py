@@ -571,28 +571,31 @@ class MACECalculator(Calculator):
                 to_keep = np.sum(per_layer_features[:num_layers])
                 descriptors = node_feats[:, :to_keep]
             
-            # Compute gradients using autograd.grad for each descriptor component
+            # Compute gradients using vectorized approach
             num_atoms, num_features = descriptors.shape
             gradients = torch.zeros(num_atoms, num_features, num_atoms, 3, device=self.device)
             
-            # Flatten descriptors for easier iteration
-            descriptors_flat = descriptors.view(-1)
+            # Create gradient outputs tensor for vectorized computation
+            grad_outputs = torch.eye(num_atoms * num_features, device=self.device, dtype=descriptors.dtype)
             
-            for idx in range(descriptors_flat.size(0)):
-                # Compute gradient of this descriptor component w.r.t. positions
-                grad = torch.autograd.grad(
-                    outputs=descriptors_flat[idx],
-                    inputs=batch_clone["positions"],
-                    retain_graph=True,
-                    create_graph=False,
-                    allow_unused=True
-                )[0]
-                
-                if grad is not None:
-                    # Convert flat index back to (atom, feature) indices
+            # Compute all gradients at once
+            all_grads = torch.autograd.grad(
+                outputs=descriptors.view(-1),
+                inputs=batch_clone["positions"],
+                grad_outputs=grad_outputs,
+                retain_graph=False,
+                create_graph=False,
+                allow_unused=True
+            )[0]
+            
+            if all_grads is not None:
+                # Reshape gradients to proper format
+                # all_grads shape: (num_descriptors, num_atoms, 3)
+                # We need: (num_atoms, num_features, num_atoms, 3)
+                for idx in range(num_atoms * num_features):
                     atom_idx = idx // num_features
                     feat_idx = idx % num_features
-                    gradients[atom_idx, feat_idx] = grad
+                    gradients[atom_idx, feat_idx] = all_grads[idx]
             
             descriptors_list.append(descriptors.detach().cpu().numpy())
             gradients_list.append(gradients.detach().cpu().numpy())
