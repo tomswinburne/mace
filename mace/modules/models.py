@@ -599,6 +599,7 @@ class ScaleShiftMACE(MACE):
             positions=positions,
             displacement=displacement,
             vectors=vectors,
+            global_descriptor=global_descriptor,
             cell=cell,
             training=training,
             compute_force=compute_force,
@@ -632,6 +633,8 @@ class ScaleShiftMACE(MACE):
             "hessian": hessian,
             "displacement": displacement,
             "node_feats": node_feats_out,
+            "global_descriptor": global_descriptor,
+            "global_descriptor_gradient": global_descriptor_gradient,
         }
 
 
