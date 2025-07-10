@@ -517,3 +517,88 @@ class MACECalculator(Calculator):
         if self.num_models == 1:
             return descriptors[0]
         return descriptors
+
+    def get_descriptor_gradients(self, atoms=None, invariants_only=True, num_layers=-1):
+        """Computes the gradients of descriptors with respect to atomic positions.
+        :param atoms: ase.Atoms object
+        :param invariants_only: bool, if True only the invariant descriptors are returned
+        :param num_layers: int, number of layers to extract descriptors from, if -1 all layers are used
+        :return: tuple of (descriptors, gradients) where:
+                 - descriptors: np.ndarray (num_atoms, num_features) of descriptors if num_models is 1 or list[np.ndarray] otherwise
+                 - gradients: np.ndarray (num_atoms, num_features, num_atoms, 3) of gradients if num_models is 1 or list[np.ndarray] otherwise
+                   gradients[i, j, k, l] = d(descriptor[i,j])/d(position[k,l])
+        """
+        if atoms is None and self.atoms is None:
+            raise ValueError("atoms not set")
+        if atoms is None:
+            atoms = self.atoms
+        if self.model_type != "MACE":
+            raise NotImplementedError("Only implemented for MACE models")
+        
+        num_interactions = int(self.models[0].num_interactions)
+        if num_layers == -1:
+            num_layers = num_interactions
+        
+        batch = self._atoms_to_batch(atoms)
+        
+        descriptors_list = []
+        gradients_list = []
+        
+        for model in self.models:
+            # Enable gradients for positions
+            batch_clone = self._clone_batch(batch)
+            batch_clone["positions"].requires_grad_(True)
+            
+            # Forward pass to get descriptors
+            output = model(batch_clone.to_dict())
+            node_feats = output["node_feats"]
+            
+            # Process descriptors based on settings
+            irreps_out = o3.Irreps(str(model.products[0].linear.irreps_out))
+            l_max = irreps_out.lmax
+            num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
+            per_layer_features = [irreps_out.dim for _ in range(num_interactions)]
+            per_layer_features[-1] = num_invariant_features
+            
+            if invariants_only:
+                descriptors = extract_invariant(
+                    node_feats,
+                    num_layers=num_layers,
+                    num_features=num_invariant_features,
+                    l_max=l_max,
+                )
+            else:
+                to_keep = np.sum(per_layer_features[:num_layers])
+                descriptors = node_feats[:, :to_keep]
+            
+            # Compute gradients using autograd.grad for each descriptor component
+            num_atoms, num_features = descriptors.shape
+            gradients = torch.zeros(num_atoms, num_features, num_atoms, 3, device=self.device)
+            
+            # Flatten descriptors for easier iteration
+            descriptors_flat = descriptors.view(-1)
+            
+            for idx in range(descriptors_flat.size(0)):
+                # Compute gradient of this descriptor component w.r.t. positions
+                grad = torch.autograd.grad(
+                    outputs=descriptors_flat[idx],
+                    inputs=batch_clone["positions"],
+                    retain_graph=True,
+                    create_graph=False,
+                    allow_unused=True
+                )[0]
+                
+                if grad is not None:
+                    # Convert flat index back to (atom, feature) indices
+                    atom_idx = idx // num_features
+                    feat_idx = idx % num_features
+                    gradients[atom_idx, feat_idx] = grad
+            
+            descriptors_list.append(descriptors.detach().cpu().numpy())
+            gradients_list.append(gradients.detach().cpu().numpy())
+        
+        if self.num_models == 1:
+            return descriptors_list[0], gradients_list[0]
+        return descriptors_list, gradients_list
+    
+
