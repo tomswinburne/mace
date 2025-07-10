@@ -212,7 +212,7 @@ def get_outputs(
         hessian = compute_hessians_vmap(forces, positions)
     else:
         hessian = None
-
+    print("compute_global_descriptor_gradient:", compute_global_descriptor_gradient)
     if compute_global_descriptor_gradient:
         assert global_descriptor is not None, "Global descriptor must be provided"
         global_descriptor_gradient = []
