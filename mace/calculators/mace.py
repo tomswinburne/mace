@@ -548,18 +548,18 @@ class MACECalculator(Calculator):
             # Enable gradients for positions
             batch_clone = self._clone_batch(batch)
             batch_clone["positions"].requires_grad_(True)
-            
+
             # Forward pass to get descriptors
             output = model(batch_clone.to_dict())
             node_feats = output["node_feats"]
-            
+
             # Process descriptors based on settings
             irreps_out = o3.Irreps(str(model.products[0].linear.irreps_out))
             l_max = irreps_out.lmax
             num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
             per_layer_features = [irreps_out.dim for _ in range(num_interactions)]
             per_layer_features[-1] = num_invariant_features
-            
+
             if invariants_only:
                 descriptors = extract_invariant(
                     node_feats,
@@ -570,38 +570,34 @@ class MACECalculator(Calculator):
             else:
                 to_keep = np.sum(per_layer_features[:num_layers])
                 descriptors = node_feats[:, :to_keep]
-            
-            # Compute gradients using vectorized approach
+
             num_atoms, num_features = descriptors.shape
-            gradients = torch.zeros(num_atoms, num_features, num_atoms, 3, device=self.device)
-            
-            # Create gradient outputs tensor for vectorized computation
-            grad_outputs = torch.eye(num_atoms * num_features, device=self.device, dtype=descriptors.dtype)
-            
-            # Compute all gradients at once
-            all_grads = torch.autograd.grad(
-                outputs=descriptors.view(-1),
-                inputs=batch_clone["positions"],
-                grad_outputs=grad_outputs,
-                retain_graph=False,
-                create_graph=False,
-                allow_unused=True
-            )[0]
-            
-            if all_grads is not None:
-                # Reshape gradients to proper format
-                # all_grads shape: (num_descriptors, num_atoms, 3)
-                # We need: (num_atoms, num_features, num_atoms, 3)
-                for idx in range(num_atoms * num_features):
-                    atom_idx = idx // num_features
-                    feat_idx = idx % num_features
-                    gradients[atom_idx, feat_idx] = all_grads[idx]
-            
+
+            # Use jacobian for all-at-once gradient computation
+            def desc_fn(pos):
+                batch_pos = self._clone_batch(batch)
+                batch_pos["positions"] = pos
+                out = model(batch_pos.to_dict())
+                node_feats_ = out["node_feats"]
+                if invariants_only:
+                    desc = extract_invariant(
+                        node_feats_,
+                        num_layers=num_layers,
+                        num_features=num_invariant_features,
+                        l_max=l_max,
+                    )
+                else:
+                    to_keep_ = np.sum(per_layer_features[:num_layers])
+                    desc = node_feats_[:, :to_keep_]
+                return desc
+
+            jac = torch.autograd.functional.jacobian(desc_fn, batch_clone["positions"], create_graph=False)
+            # jac shape: (num_atoms, num_features, num_atoms, 3)
             descriptors_list.append(descriptors.detach().cpu().numpy())
-            gradients_list.append(gradients.detach().cpu().numpy())
+            gradients_list.append(jac.detach().cpu().numpy())
         
         if self.num_models == 1:
             return descriptors_list[0], gradients_list[0]
         return descriptors_list, gradients_list
-    
+
 
