@@ -491,7 +491,7 @@ class MACECalculator(Calculator):
             global_Ds.append(results["global_descriptor"])
             global_dDs.append(results["global_descriptor_gradient"])
         global_dDs = [global_dD.detach().cpu().numpy() for global_dD in global_dDs]
-        global_Ds = [global_D.detach().cpu().numpy() for global_dD in global_dDs]
+        global_Ds = [global_D.detach().cpu().numpy() for global_D in global_Ds]
         
         if self.num_models == 1:
             return global_Ds[0],global_dDs[0]
