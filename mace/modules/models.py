@@ -386,6 +386,7 @@ class MACE(torch.nn.Module):
         node_energy = node_e0.double() + pair_node_energy.double()
 
         if compute_global_descriptor_gradient:
+            print("Computing global descriptor gradient")
             irreps_out = o3.Irreps(str(self.products[0].linear.irreps_out))
             l_max = irreps_out.lmax
             num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
@@ -396,6 +397,7 @@ class MACE(torch.nn.Module):
                         l_max=l_max,
                     )
             global_descriptor = torch.sum(global_descriptor, dim=0)
+            print("global descriptor shape:", global_descriptor.shape)
         else:
             global_descriptor = None
 
@@ -413,6 +415,9 @@ class MACE(torch.nn.Module):
             compute_hessian=compute_hessian,
             compute_edge_forces=compute_edge_forces,
         )
+        if compute_global_descriptor_gradient:
+            print("Computed global descriptor gradient, shape:",
+                  global_descriptor_gradient.shape)
 
         atomic_virials: Optional[torch.Tensor] = None
         atomic_stresses: Optional[torch.Tensor] = None
