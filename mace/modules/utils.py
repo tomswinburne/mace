@@ -219,7 +219,7 @@ def get_outputs(
         global_descriptor_gradient = [
             compute_forces(
                 energy=D,
-                positions=position,
+                positions=positions,
                 training=(training or compute_hessian or compute_edge_forces),
             ) for D in global_descriptor ]
         global_descriptor_gradient = \
