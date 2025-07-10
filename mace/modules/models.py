@@ -597,6 +597,7 @@ class ScaleShiftMACE(MACE):
                         num_features=num_invariant_features,
                         l_max=l_max,
                     )
+            global_descriptor = torch.sum(global_descriptor, dim=0)
             print("global descriptor shape:", global_descriptor.shape)
         else:
             global_descriptor = None

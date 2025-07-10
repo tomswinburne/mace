@@ -215,15 +215,18 @@ def get_outputs(
 
     if compute_global_descriptor_gradient:
         assert global_descriptor is not None, "Global descriptor must be provided"
-        """global_descriptor_gradient = []
+        global_descriptor_gradient = []
         for i in range(global_descriptor.size):
             grad = compute_forces(
                 energy=global_descriptor[i],
                 positions=position,
                 training=(training or compute_hessian or compute_edge_forces),
             )
+            print(f"Global descriptor gradient {i} shape: {grad.shape}")
             global_descriptor_gradient.append(grad)
-        global_descriptor_gradient = torch.stack(global_descriptor_gradient, dim=-1)"""
+        global_descriptor_gradient = torch.stack(global_descriptor_gradient, dim=0)
+        
+        """
         global_descriptor = global_descriptor.view(-1)
         global_descriptor_gradient = torch.autograd.grad(
             outputs=[global_descriptor],
@@ -239,6 +242,7 @@ def get_outputs(
             )
         else:
             global_descriptor_gradient = global_descriptor_gradient.view(*positions.shape, -1)
+        """
     else:
         global_descriptor_gradient = None
 
