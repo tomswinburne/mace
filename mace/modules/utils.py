@@ -193,14 +193,14 @@ def get_outputs(
             displacement=displacement,
             cell=cell,
             compute_stress=compute_stress,
-            training=(training or compute_hessian or compute_edge_forces),
+            training=(training or compute_hessian or compute_edge_forces or compute_global_descriptor_gradient),
         )
     elif compute_force:
         forces, virials, stress = (
             compute_forces(
                 energy=energy,
                 positions=positions,
-                training=(training or compute_hessian or compute_edge_forces),
+                training=(training or compute_hessian or compute_edge_forces or compute_global_descriptor_gradient),
             ),
             None,
             None,
@@ -251,7 +251,7 @@ def get_outputs(
         edge_forces = compute_forces(
             energy=energy,
             positions=vectors,
-            training=(training or compute_hessian),
+            training=(training or compute_hessian or compute_global_descriptor_gradient),
         )
         if edge_forces is not None:
             edge_forces = -1 * edge_forces  # Match LAMMPS sign convention
