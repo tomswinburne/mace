@@ -401,7 +401,7 @@ class MACE(torch.nn.Module):
         else:
             global_descriptor = None
 
-        forces, virials, stress, hessian, edge_forces,global_descriptor_gradient = get_outputs(
+        forces, virials, stress, hessian, edge_forces, global_descriptor_gradient = get_outputs(
             energy=total_energy,
             positions=positions,
             displacement=displacement,
@@ -587,6 +587,7 @@ class ScaleShiftMACE(MACE):
         node_energy = node_e0.clone().double() + node_inter_es.clone().double()
 
         if compute_global_descriptor_gradient:
+            print("Computing global descriptor gradient")
             irreps_out = o3.Irreps(str(self.products[0].linear.irreps_out))
             l_max = irreps_out.lmax
             num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
@@ -596,6 +597,7 @@ class ScaleShiftMACE(MACE):
                         num_features=num_invariant_features,
                         l_max=l_max,
                     )
+            print("global descriptor shape:", global_descriptor.shape)
         else:
             global_descriptor = None
 
