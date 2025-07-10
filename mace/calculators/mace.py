@@ -449,7 +449,7 @@ class MACECalculator(Calculator):
                     .cpu()
                     .numpy()
                 )
-
+    
     def get_hessian(self, atoms=None):
         if atoms is None and self.atoms is None:
             raise ValueError("atoms not set")
@@ -471,6 +471,27 @@ class MACECalculator(Calculator):
         if self.num_models == 1:
             return hessians[0]
         return hessians
+    
+    def get_global_descriptor_gradient(self, atoms=None):
+        if atoms is None and self.atoms is None:
+            raise ValueError("atoms not set")
+        if atoms is None:
+            atoms = self.atoms
+        if self.model_type != "MACE":
+            raise NotImplementedError("Only implemented for MACE models")
+        batch = self._atoms_to_batch(atoms)
+        global_dD = [
+            model(
+                self._clone_batch(batch).to_dict(),
+                compute_global_descriptor_gradient=True,
+                training=self.use_compile,
+            )["global_descriptor_gradient"]
+            for model in self.models
+        ]
+        global_dDs = [dD.detach().cpu().numpy() for dD in global_dD]
+        if self.num_models == 1:
+            return global_dDs[0]
+        return global_dDs
 
     def get_descriptors(self, atoms=None, invariants_only=True, num_layers=-1):
         """Extracts the descriptors from MACE model.
@@ -517,87 +538,5 @@ class MACECalculator(Calculator):
         if self.num_models == 1:
             return descriptors[0]
         return descriptors
-
-    def get_descriptor_gradients(self, atoms=None, invariants_only=True, num_layers=-1):
-        """Computes the gradients of descriptors with respect to atomic positions.
-        :param atoms: ase.Atoms object
-        :param invariants_only: bool, if True only the invariant descriptors are returned
-        :param num_layers: int, number of layers to extract descriptors from, if -1 all layers are used
-        :return: tuple of (descriptors, gradients) where:
-                 - descriptors: np.ndarray (num_atoms, num_features) of descriptors if num_models is 1 or list[np.ndarray] otherwise
-                 - gradients: np.ndarray (num_atoms, num_features, num_atoms, 3) of gradients if num_models is 1 or list[np.ndarray] otherwise
-                   gradients[i, j, k, l] = d(descriptor[i,j])/d(position[k,l])
-        """
-        if atoms is None and self.atoms is None:
-            raise ValueError("atoms not set")
-        if atoms is None:
-            atoms = self.atoms
-        if self.model_type != "MACE":
-            raise NotImplementedError("Only implemented for MACE models")
-        
-        num_interactions = int(self.models[0].num_interactions)
-        if num_layers == -1:
-            num_layers = num_interactions
-        
-        batch = self._atoms_to_batch(atoms)
-        
-        descriptors_list = []
-        gradients_list = []
-        
-        for model in self.models:
-            # Enable gradients for positions
-            batch_clone = self._clone_batch(batch)
-            batch_clone["positions"].requires_grad_(True)
-
-            # Forward pass to get descriptors
-            output = model(batch_clone.to_dict())
-            node_feats = output["node_feats"]
-
-            # Process descriptors based on settings
-            irreps_out = o3.Irreps(str(model.products[0].linear.irreps_out))
-            l_max = irreps_out.lmax
-            num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
-            per_layer_features = [irreps_out.dim for _ in range(num_interactions)]
-            per_layer_features[-1] = num_invariant_features
-
-            if invariants_only:
-                descriptors = extract_invariant(
-                    node_feats,
-                    num_layers=num_layers,
-                    num_features=num_invariant_features,
-                    l_max=l_max,
-                )
-            else:
-                to_keep = np.sum(per_layer_features[:num_layers])
-                descriptors = node_feats[:, :to_keep]
-
-            num_atoms, num_features = descriptors.shape
-
-            # Use jacobian for all-at-once gradient computation
-            def desc_fn(pos):
-                batch_pos = self._clone_batch(batch)
-                batch_pos["positions"] = pos
-                out = model(batch_pos.to_dict())
-                node_feats_ = out["node_feats"]
-                if invariants_only:
-                    desc = extract_invariant(
-                        node_feats_,
-                        num_layers=num_layers,
-                        num_features=num_invariant_features,
-                        l_max=l_max,
-                    )
-                else:
-                    to_keep_ = np.sum(per_layer_features[:num_layers])
-                    desc = node_feats_[:, :to_keep_]
-                return desc
-
-            jac = torch.autograd.functional.jacobian(desc_fn, batch_clone["positions"], create_graph=False)
-            # jac shape: (num_atoms, num_features, num_atoms, 3)
-            descriptors_list.append(descriptors.detach().cpu().numpy())
-            gradients_list.append(jac.detach().cpu().numpy())
-        
-        if self.num_models == 1:
-            return descriptors_list[0], gradients_list[0]
-        return descriptors_list, gradients_list
 
 

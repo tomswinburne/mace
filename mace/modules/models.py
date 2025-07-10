@@ -384,11 +384,25 @@ class MACE(torch.nn.Module):
         node_feats_out = torch.cat(node_feats_concat, dim=-1)
         node_energy = node_e0.double() + pair_node_energy.double()
 
-        forces, virials, stress, hessian, edge_forces = get_outputs(
+        if compute_global_descriptor_gradient:
+            irreps_out = o3.Irreps(str(self.products[0].linear.irreps_out))
+            l_max = irreps_out.lmax
+            num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
+            global_descriptor = extract_invariant(
+                        node_feats_out,
+                        num_layers=self.num_interactions,
+                        num_features=num_invariant_features,
+                        l_max=l_max,
+                    )
+        else:
+            global_descriptor = None
+
+        forces, virials, stress, hessian, edge_forces,global_descriptor_gradient = get_outputs(
             energy=total_energy,
             positions=positions,
             displacement=displacement,
             vectors=vectors,
+            global_descriptor=global_descriptor,
             cell=cell,
             training=training,
             compute_force=compute_force,
@@ -422,6 +436,8 @@ class MACE(torch.nn.Module):
             "displacement": displacement,
             "hessian": hessian,
             "node_feats": node_feats_out,
+            "global_descriptor": global_descriptor,
+            "global_descriptor_gradient": global_descriptor_gradient,
         }
 
 
@@ -449,6 +465,7 @@ class ScaleShiftMACE(MACE):
         compute_hessian: bool = False,
         compute_edge_forces: bool = False,
         compute_atomic_stresses: bool = False,
+        compute_global_descriptor_gradient: bool = False,
         lammps_mliap: bool = False,
     ) -> Dict[str, Optional[torch.Tensor]]:
         # Setup
@@ -562,7 +579,20 @@ class ScaleShiftMACE(MACE):
         total_energy = e0 + inter_e
         node_energy = node_e0.clone().double() + node_inter_es.clone().double()
 
-        forces, virials, stress, hessian, edge_forces = get_outputs(
+        if compute_global_descriptor_gradient:
+            irreps_out = o3.Irreps(str(self.products[0].linear.irreps_out))
+            l_max = irreps_out.lmax
+            num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
+            global_descriptor = extract_invariant(
+                        node_feats_out,
+                        num_layers=self.num_interactions,
+                        num_features=num_invariant_features,
+                        l_max=l_max,
+                    )
+        else:
+            global_descriptor = None
+
+        forces, virials, stress, hessian, edge_forces,global_descriptor_gradient = get_outputs(
             energy=inter_e,
             positions=positions,
             displacement=displacement,
@@ -1055,7 +1085,7 @@ class EnergyDipolesMACE(torch.nn.Module):
         )  # [n_graphs,3]
         total_dipole = total_dipole + baseline
 
-        forces, virials, stress, _, _ = get_outputs(
+        forces, virials, stress, _, _, _ = get_outputs(
             energy=total_energy,
             positions=data["positions"],
             displacement=displacement,

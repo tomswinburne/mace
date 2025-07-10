@@ -19,6 +19,8 @@ from mace.tools.torch_geometric.batch import Batch
 from .blocks import AtomicEnergiesBlock
 
 
+
+
 def compute_forces(
     energy: torch.Tensor, positions: torch.Tensor, training: bool = True
 ) -> torch.Tensor:
@@ -168,13 +170,16 @@ def get_outputs(
     cell: torch.Tensor,
     displacement: Optional[torch.Tensor],
     vectors: Optional[torch.Tensor] = None,
+    global_descriptor: Optional[torch.Tensor] = None,
     training: bool = False,
     compute_force: bool = True,
     compute_virials: bool = True,
     compute_stress: bool = True,
     compute_hessian: bool = False,
     compute_edge_forces: bool = False,
+    compute_global_descriptor_gradient: bool = False,
 ) -> Tuple[
+    Optional[torch.Tensor],
     Optional[torch.Tensor],
     Optional[torch.Tensor],
     Optional[torch.Tensor],
@@ -207,6 +212,36 @@ def get_outputs(
         hessian = compute_hessians_vmap(forces, positions)
     else:
         hessian = None
+
+    if compute_global_descriptor_gradient:
+        assert global_descriptor is not None, "Global descriptor must be provided"
+        """global_descriptor_gradient = []
+        for i in range(global_descriptor.size):
+            grad = compute_forces(
+                energy=global_descriptor[i],
+                positions=position,
+                training=(training or compute_hessian or compute_edge_forces),
+            )
+            global_descriptor_gradient.append(grad)
+        global_descriptor_gradient = torch.stack(global_descriptor_gradient, dim=-1)"""
+        global_descriptor = global_descriptor.view(-1)
+        global_descriptor_gradient = torch.autograd.grad(
+            outputs=[global_descriptor],
+            inputs=[positions],
+            grad_outputs=[torch.eye(global_descriptor.numel(), device=global_descriptor.device)],
+            retain_graph=(training or compute_hessian or compute_edge_forces),
+            create_graph=(training or compute_hessian or compute_edge_forces),
+            allow_unused=True,
+        )[0]
+        if global_descriptor_gradient is None:
+            global_descriptor_gradient = torch.zeros(
+            positions.shape + (global_descriptor.numel(),), device=positions.device, dtype=positions.dtype
+            )
+        else:
+            global_descriptor_gradient = global_descriptor_gradient.view(*positions.shape, -1)
+    else:
+        global_descriptor_gradient = None
+
     if compute_edge_forces and vectors is not None:
         edge_forces = compute_forces(
             energy=energy,
@@ -217,7 +252,7 @@ def get_outputs(
             edge_forces = -1 * edge_forces  # Match LAMMPS sign convention
     else:
         edge_forces = None
-    return forces, virials, stress, hessian, edge_forces
+    return forces, virials, stress, hessian, edge_forces, global_descriptor_gradient
 
 
 def get_atomic_virials_stresses(
