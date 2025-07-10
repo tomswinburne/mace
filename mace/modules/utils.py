@@ -213,9 +213,9 @@ def get_outputs(
     else:
         hessian = None
     
-    print("compute_global_descriptor_gradient:", compute_global_descriptor_gradient)
     if compute_global_descriptor_gradient:
         assert global_descriptor is not None, "Global descriptor must be provided"
+        # TODO: vectorize and optimize tracing for memory usage
         global_descriptor_gradient = [
             compute_forces(
                 energy=D,
@@ -224,26 +224,7 @@ def get_outputs(
             ) for D in global_descriptor ]
         global_descriptor_gradient = \
             torch.stack(global_descriptor_gradient, dim=0)
-        print("global_descriptor_gradient shape:", \
-            global_descriptor_gradient.shape)
         
-        """
-        global_descriptor = global_descriptor.view(-1)
-        global_descriptor_gradient = torch.autograd.grad(
-            outputs=[global_descriptor],
-            inputs=[positions],
-            grad_outputs=[torch.eye(global_descriptor.numel(), device=global_descriptor.device)],
-            retain_graph=(training or compute_hessian or compute_edge_forces),
-            create_graph=(training or compute_hessian or compute_edge_forces),
-            allow_unused=True,
-        )[0]
-        if global_descriptor_gradient is None:
-            global_descriptor_gradient = torch.zeros(
-            positions.shape + (global_descriptor.numel(),), device=positions.device, dtype=positions.dtype
-            )
-        else:
-            global_descriptor_gradient = global_descriptor_gradient.view(*positions.shape, -1)
-        """
     else:
         global_descriptor_gradient = None
 
