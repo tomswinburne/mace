@@ -480,7 +480,7 @@ class MACECalculator(Calculator):
         if self.model_type != "MACE":
             raise NotImplementedError("Only implemented for MACE models")
         batch = self._atoms_to_batch(atoms)
-        global_dD = [
+        global_dDs = [
             model(
                 self._clone_batch(batch).to_dict(),
                 compute_global_descriptor_gradient=True,
@@ -488,7 +488,7 @@ class MACECalculator(Calculator):
             )["global_descriptor_gradient"]
             for model in self.models
         ]
-        global_dDs = [dD.detach().cpu().numpy() for dD in global_dD]
+        global_dDs = [global_dD.detach().cpu().numpy() for global_dD in global_dDs]
         if self.num_models == 1:
             return global_dDs[0]
         return global_dDs
