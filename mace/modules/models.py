@@ -414,6 +414,7 @@ class MACE(torch.nn.Module):
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
             compute_edge_forces=compute_edge_forces,
+            compute_global_descriptor_gradient=compute_global_descriptor_gradient,
         )
         if compute_global_descriptor_gradient:
             print("Computed global descriptor gradient, shape:",
@@ -615,6 +616,7 @@ class ScaleShiftMACE(MACE):
             compute_stress=compute_stress,
             compute_hessian=compute_hessian,
             compute_edge_forces=compute_edge_forces or compute_atomic_stresses,
+            compute_global_descriptor_gradient=compute_global_descriptor_gradient,
         )
 
         atomic_virials: Optional[torch.Tensor] = None
