@@ -34,6 +34,7 @@ from .utils import (
     get_outputs,
     get_symmetric_displacement,
     prepare_graph,
+    extract_invariant,
 )
 
 # pylint: disable=C0302
@@ -394,6 +395,7 @@ class MACE(torch.nn.Module):
                         num_features=num_invariant_features,
                         l_max=l_max,
                     )
+            global_descriptor = torch.sum(global_descriptor, dim=0)
         else:
             global_descriptor = None
 
