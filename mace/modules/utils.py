@@ -212,19 +212,20 @@ def get_outputs(
         hessian = compute_hessians_vmap(forces, positions)
     else:
         hessian = None
+    
     print("compute_global_descriptor_gradient:", compute_global_descriptor_gradient)
     if compute_global_descriptor_gradient:
         assert global_descriptor is not None, "Global descriptor must be provided"
-        global_descriptor_gradient = []
-        for i in range(global_descriptor.size):
-            grad = compute_forces(
-                energy=global_descriptor[i],
+        global_descriptor_gradient = [
+            compute_forces(
+                energy=D,
                 positions=position,
                 training=(training or compute_hessian or compute_edge_forces),
-            )
-            print(f"Global descriptor gradient {i} shape: {grad.shape}")
-            global_descriptor_gradient.append(grad)
-        global_descriptor_gradient = torch.stack(global_descriptor_gradient, dim=0)
+            ) for D in global_descriptor ]
+        global_descriptor_gradient = \
+            torch.stack(global_descriptor_gradient, dim=0)
+        print("global_descriptor_gradient shape:", \
+            global_descriptor_gradient.shape)
         
         """
         global_descriptor = global_descriptor.view(-1)
