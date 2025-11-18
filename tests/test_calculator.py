@@ -854,3 +854,61 @@ def test_mace_omol_cueq(tmp_path, device="cpu"):
     assert np.allclose(forces, forces_cueq, atol=1e-6)
     assert np.allclose(energy, -2079.863496758961, atol=1e-9)
     write_extxyz_test(tmp_path, mol)
+
+
+def test_calculator_descriptor_gradients(fitting_configs, trained_equivariant_model):
+    """Test get_descriptors_gradients function."""
+    at = fitting_configs[2].copy()
+    calc = trained_equivariant_model
+
+    # Test 1: Basic shape and default behavior
+    grads = calc.get_descriptors_gradients(at)
+    assert grads.shape[0] == len(at)  # num_atoms
+    assert grads.shape[1] == 3  # spatial dimensions
+    assert grads.shape[2] == 32  # total_features (2 layers * 16 features)
+
+    # Test 2: Custom weight vector
+    weight_vector = np.random.rand(len(at))
+    grads_weighted = calc.get_descriptors_gradients(at, weight_vector=weight_vector)
+    assert grads_weighted.shape == grads.shape
+    # Should be different from uniform weights
+    assert not np.allclose(grads, grads_weighted)
+
+    # Test 3: Single layer
+    grads_single_layer = calc.get_descriptors_gradients(at, num_layers=1)
+    assert grads_single_layer.shape[0] == len(at)
+    assert grads_single_layer.shape[1] == 3
+    assert grads_single_layer.shape[2] == 16  # 1 layer * 16 features
+
+    # Test 4: Numerical gradient check
+    eps = 1e-5
+    atom_idx = 0
+    coord_idx = 0
+
+    # Get descriptors at current position
+    desc_0_flat = calc.get_descriptors(at, invariants_only=True)
+    desc_0 = desc_0_flat.reshape(len(at), 2, 16)  # 2 layers, 16 features
+    weighted_desc_0 = (np.ones(len(at))[:, None, None] * desc_0).sum(0)
+
+    # Perturb position
+    at_pert = at.copy()
+    pos = at_pert.positions.copy()
+    pos[atom_idx, coord_idx] += eps
+    at_pert.positions = pos
+
+    # Get descriptors at perturbed position
+    desc_1_flat = calc.get_descriptors(at_pert, invariants_only=True)
+    desc_1 = desc_1_flat.reshape(len(at), 2, 16)
+    weighted_desc_1 = (np.ones(len(at))[:, None, None] * desc_1).sum(0)
+
+    # Numerical gradient
+    numerical_grad = (weighted_desc_1 - weighted_desc_0) / eps
+    numerical_grad_flat = numerical_grad.flatten()
+
+    # Analytical gradient
+    analytical_grad_flat = grads[atom_idx, coord_idx, :]
+
+    # Check agreement
+    np.testing.assert_allclose(
+        numerical_grad_flat, analytical_grad_flat, rtol=1e-4, atol=1e-6
+    )

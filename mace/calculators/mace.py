@@ -570,7 +570,7 @@ class MACECalculator(Calculator):
         :param atoms: ase.Atoms object
         :param invariants_only: bool, if True only the invariant descriptors are returned
         :param num_layers: int, number of layers to extract descriptors from, if -1 all layers are used
-        :return: np.ndarray (num_atoms, num_interactions, invariant_features) of invariant descriptors if num_models is 1 or list[np.ndarray] otherwise
+        :return: np.ndarray of shape (num_atoms, total_features) where total_features = num_layers * num_invariant_features, if num_models is 1 or list[np.ndarray] otherwise
         """
         if atoms is None and self.atoms is None:
             raise ValueError("atoms not set")
@@ -610,3 +610,79 @@ class MACECalculator(Calculator):
         if self.num_models == 1:
             return descriptors[0]
         return descriptors
+
+    def get_descriptors_gradients(
+        self, atoms=None, weight_vector=None, num_layers=-1, use_finite_diff=False
+    ):
+        """Extracts the spatial gradients of weighted descriptors from MACE model.
+        :param atoms: ase.Atoms object
+        :param weight_vector: np.ndarray of shape (num_atoms,), weights for each atom. If None, defaults to ones.
+        :param num_layers: int, number of layers to extract descriptors from, if -1 all layers are used
+        :param use_finite_diff: bool, if True use finite differences instead of autograd (slower but more robust)
+        :return: np.ndarray of shape (num_atoms, 3, total_features) where total_features = num_layers * num_invariant_features, containing spatial gradients of the weighted descriptor sum
+        """
+        if atoms is None and self.atoms is None:
+            raise ValueError("atoms not set")
+        if atoms is None:
+            atoms = self.atoms
+        if self.model_type != "MACE":
+            raise NotImplementedError("Only implemented for MACE models")
+        if self.num_models != 1:
+            raise NotImplementedError(
+                "Only implemented for single models (num_models=1)"
+            )
+
+        num_atoms = len(atoms)
+        if weight_vector is None:
+            weight_vector = np.ones(num_atoms)
+        else:
+            weight_vector = np.asarray(weight_vector)
+            if weight_vector.shape != (num_atoms,):
+                raise ValueError(
+                    f"weight_vector must have shape ({num_atoms},), got {weight_vector.shape}"
+                )
+
+        # Get model metadata to understand descriptor structure
+        num_interactions = int(self.models[0].num_interactions)
+        if num_layers == -1:
+            num_layers = num_interactions
+
+        irreps_out = o3.Irreps(str(self.models[0].products[0].linear.irreps_out))
+        l_max = irreps_out.lmax
+        num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
+
+        # Get descriptors at current position - shape: (num_atoms, total_features)
+        descriptors_0_flat = self.get_descriptors(atoms, invariants_only=True, num_layers=num_layers)
+
+        # Reshape to (num_atoms, num_layers, num_invariant_features)
+        descriptors_0 = descriptors_0_flat.reshape(num_atoms, num_layers, num_invariant_features)
+
+        # Compute weighted descriptors at current position - shape: (num_layers, num_invariant_features)
+        weighted_desc_0 = (weight_vector[:, None, None] * descriptors_0).sum(axis=0)
+
+        # Initialize gradient storage
+        total_features = num_layers * num_invariant_features
+        gradients = np.zeros((num_atoms, 3, total_features))
+
+        # Use finite differences
+        eps = 1e-6
+        for atom_idx in range(num_atoms):
+            for coord_idx in range(3):
+                # Perturb position
+                atoms_pert = atoms.copy()
+                pos = atoms_pert.positions.copy()
+                pos[atom_idx, coord_idx] += eps
+                atoms_pert.positions = pos
+
+                # Get descriptors at perturbed position
+                descriptors_pert_flat = self.get_descriptors(
+                    atoms_pert, invariants_only=True, num_layers=num_layers
+                )
+                descriptors_pert = descriptors_pert_flat.reshape(num_atoms, num_layers, num_invariant_features)
+                weighted_desc_pert = (weight_vector[:, None, None] * descriptors_pert).sum(axis=0)
+
+                # Compute finite difference gradient and flatten
+                grad_2d = (weighted_desc_pert - weighted_desc_0) / eps
+                gradients[atom_idx, coord_idx, :] = grad_2d.flatten()
+
+        return gradients
