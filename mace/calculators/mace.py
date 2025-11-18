@@ -686,3 +686,262 @@ class MACECalculator(Calculator):
                 gradients[atom_idx, coord_idx, :] = grad_2d.flatten()
 
         return gradients
+
+    def get_energy_descriptors_gradients(self, atoms=None, num_layers=-1):
+        """Computes the gradient of energy with respect to descriptors.
+
+        This function computes dE/dD where E is the total energy and D are the
+        invariant descriptors at each layer. For linear readout heads, this is
+        simply the readout weights. For nonlinear readouts, autograd is used.
+
+        :param atoms: ase.Atoms object
+        :param num_layers: int, number of layers to extract descriptors from, if -1 all layers are used
+        :return: np.ndarray of shape (num_atoms, total_features) where total_features = num_layers * num_invariant_features
+        """
+        if atoms is None and self.atoms is None:
+            raise ValueError("atoms not set")
+        if atoms is None:
+            atoms = self.atoms
+        if self.model_type != "MACE":
+            raise NotImplementedError("Only implemented for MACE models")
+        if self.num_models != 1:
+            raise NotImplementedError(
+                "Only implemented for single models (num_models=1)"
+            )
+
+        # Get model metadata
+        num_interactions = int(self.models[0].num_interactions)
+        if num_layers == -1:
+            num_layers = num_interactions
+
+        irreps_out = o3.Irreps(str(self.models[0].products[0].linear.irreps_out))
+        l_max = irreps_out.lmax
+        num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
+
+        num_atoms = len(atoms)
+        total_features = num_layers * num_invariant_features
+
+        model = self.models[0]
+
+        # Check if all readouts are linear
+        all_linear = all(hasattr(readout, 'linear') and not hasattr(readout, 'linear_1')
+                        for readout in model.readouts[:num_layers])
+
+        if all_linear:
+            # Analytical gradient: for linear readouts, dE/dD is just the readout weights
+            # For E = sum_i sum_j w_j * D_ij, we have dE/dD_ij = w_j
+            gradients = np.zeros((num_atoms, total_features))
+
+            for layer_idx in range(num_layers):
+                if layer_idx < len(model.readouts):
+                    readout = model.readouts[layer_idx]
+                    # Get the linear weight: shape is (num_heads, num_features_in)
+                    weight = readout.linear.weight.detach().cpu().numpy()
+
+                    start_idx = layer_idx * num_invariant_features
+                    end_idx = (layer_idx + 1) * num_invariant_features
+
+                    # The readout operates on invariant features only
+                    # weight shape could be (1, num_invariant_features) or similar
+                    # We need to extract the relevant part that operates on invariants
+
+                    if weight.shape[1] == num_invariant_features:
+                        # Direct match - weight operates on invariant features
+                        # Broadcast to all atoms
+                        gradients[:, start_idx:end_idx] = np.tile(weight[0:1, :], (num_atoms, 1))
+                    else:
+                        # Weight operates on full irreps - need to extract invariant part
+                        # For now, assume first num_invariant_features columns
+                        gradients[:, start_idx:end_idx] = np.tile(
+                            weight[0:1, :num_invariant_features], (num_atoms, 1)
+                        )
+
+            return gradients
+
+        else:
+            # Nonlinear readout: use autograd through the readout heads
+            # We need to:
+            # 1. Get the descriptors (node_feats) from the model
+            # 2. Enable gradients on them
+            # 3. Pass through readout heads
+            # 4. Compute gradients w.r.t. descriptors
+
+            batch = self._atoms_to_batch(atoms)
+
+            gradients = np.zeros((num_atoms, total_features))
+
+            # Run forward pass and extract node_feats
+            with torch.enable_grad():
+                out = model(batch.to_dict(), compute_stress=False, training=False)
+
+                # node_feats_out is concatenated features from all layers
+                # Shape: (num_atoms, num_layers * full_irreps_dim)
+                node_feats_concat = out["node_feats"]
+
+                # Extract invariant descriptors for each layer
+                # We need to manually extract invariants and enable gradients
+                descriptors_list = []
+                for i in range(num_layers):
+                    # Get this layer's node_feats
+                    layer_feats = node_feats_concat[:, i * irreps_out.dim : (i + 1) * irreps_out.dim]
+
+                    # Extract invariant features
+                    layer_invariants = extract_invariant(
+                        layer_feats.unsqueeze(0),
+                        num_layers=1,
+                        num_features=num_invariant_features,
+                        l_max=l_max,
+                    ).squeeze(0)  # Shape: (num_atoms, num_invariant_features)
+
+                    descriptors_list.append(layer_invariants)
+
+                # Concatenate: shape (num_atoms, total_features)
+                descriptors = torch.cat(descriptors_list, dim=1)
+                descriptors = descriptors.detach().clone().requires_grad_(True)
+
+                # Now we need to recompute energy from these descriptors
+                # Problem: we can't easily do this without rerunning the readout heads
+                # on the *full* node_feats (not just invariants)
+
+                # Alternative approach: compute jacobian using torch.autograd.functional
+                # For each layer, we need dE/d(layer_invariants)
+
+                # This is complex - let's use a simpler numerical approach
+                # For each descriptor feature, compute dE/dD numerically
+
+            # Numerical differentiation approach
+            # Get baseline descriptors and energy
+            descriptors_0 = self.get_descriptors(atoms, invariants_only=True, num_layers=num_layers)
+            descriptors_0 = descriptors_0.reshape(num_atoms, num_layers, num_invariant_features)
+
+            E_0 = atoms.copy()
+            E_0.calc = self
+            energy_0 = E_0.get_potential_energy()
+
+            # For each descriptor, we need to find how to perturb it via positions
+            # This is the inverse problem and is expensive
+            # Better: use finite differences in energy/position space combined with
+            # descriptor gradients
+
+            # Using dE/dD = sum_ia (dE/dpos_ia) * (dpos_ia/dD)
+            # But (dpos/dD) is hard to compute
+
+            # Simpler: use the fact that for small perturbations,
+            # delta_E ≈ sum_ij (dE/dD_ij) * delta_D_ij
+            # We can solve this as a least-squares problem by perturbing positions
+
+            # For now, let's use a different approach: compute gradients layer by layer
+            # using the fact that the readout is applied per-layer
+
+            # The key insight: the readout operates on node_feats which contain
+            # both invariant and non-invariant features. For equivariant features (l>0),
+            # the readout must preserve equivariance, meaning only invariant (l=0)
+            # features contribute to the scalar energy output.
+
+            # Therefore, dE/d(non-invariant features) = 0, and we only need
+            # dE/d(invariant features)
+
+            for layer_idx in range(num_layers):
+                readout = model.readouts[layer_idx]
+
+                # Get this layer's descriptors with gradients enabled
+                with torch.enable_grad():
+                    # Re-run model to get fresh gradients
+                    out_fresh = model(batch.to_dict(), compute_stress=False, training=False)
+                    node_feats_concat_fresh = out_fresh["node_feats"]
+
+                    # Extract this layer's features
+                    layer_feats = node_feats_concat_fresh[:, layer_idx * irreps_out.dim : (layer_idx + 1) * irreps_out.dim]
+
+                    # The layer_feats contain both invariant and equivariant features
+                    # arranged according to the irreps structure
+                    # For l=0,1,2,...,l_max, we have (2l+1) components for each l
+                    # The first num_invariant_features are the l=0 (invariant) features
+
+                    # Extract only invariant features
+                    layer_invariants = extract_invariant(
+                        layer_feats.unsqueeze(0),
+                        num_layers=1,
+                        num_features=num_invariant_features,
+                        l_max=l_max,
+                    ).squeeze(0)  # Shape: (num_atoms, num_invariant_features)
+                    layer_invariants = layer_invariants.clone().detach().requires_grad_(True)
+
+                    # For the readout, we need to reconstruct full node_feats with only
+                    # invariants having gradients. But this is complex.
+                    # Better: directly compute gradient by finite differences on invariants
+
+                # Finite difference approach: perturb each invariant feature slightly
+                # and measure energy change
+                eps = 1e-5
+                for feat_idx in range(num_invariant_features):
+                    # We need to perturb the invariant feature and recompute energy
+                    # But we can't directly modify descriptors in the model
+                    # This approach won't work either
+
+                    # Alternative: since we have the readout weights/function,
+                    # we can compute the gradient analytically for each atom
+
+                    pass  # Continue to next approach
+
+            # New approach: For each atom individually, compute how its descriptor
+            # gradients affect energy via the readout
+            # For atom i: E_i = readout(descriptors_i)
+            # So dE/dD_i = d(readout)/dD_i
+
+            for layer_idx in range(num_layers):
+                readout = model.readouts[layer_idx]
+
+                # Create a dummy input with gradients enabled
+                # We'll compute the jacobian of the readout for each atom
+
+                with torch.enable_grad():
+                    # Get the descriptors for this layer
+                    out_base = model(batch.to_dict(), compute_stress=False, training=False)
+                    node_feats_concat = out_base["node_feats"]
+                    layer_feats = node_feats_concat[:, layer_idx * irreps_out.dim : (layer_idx + 1) * irreps_out.dim]
+
+                    # Get heads info
+                    if 'node_heads' in out_base:
+                        node_heads = out_base['node_heads']
+                    elif hasattr(batch, 'heads'):
+                        node_heads = batch.heads
+                    else:
+                        node_heads = torch.zeros(num_atoms, dtype=torch.long, device=layer_feats.device)
+
+                    # For each atom, compute gradient of its energy w.r.t. its descriptors
+                    for atom_idx in range(num_atoms):
+                        # Create input for just this atom with gradients
+                        atom_feats = layer_feats[atom_idx:atom_idx+1].clone().detach().requires_grad_(True)
+                        atom_head = node_heads[atom_idx:atom_idx+1]
+
+                        # Apply readout
+                        atom_energy = readout(atom_feats, atom_head)
+                        if atom_energy.dim() > 1:
+                            atom_energy = atom_energy[0, atom_head[0]]
+                        else:
+                            atom_energy = atom_energy[0]
+
+                        # Compute gradient
+                        grad_feats = torch.autograd.grad(
+                            atom_energy,
+                            atom_feats,
+                            create_graph=False,
+                        )[0]  # Shape: (1, full_irreps_dim)
+
+                        # Extract invariant part
+                        # The invariants are at specific indices in the irreps structure
+                        # For a standard irreps like "128x0e + 128x1o + ...", the first 128 are invariants
+                        grad_invariants = extract_invariant(
+                            grad_feats,
+                            num_layers=1,
+                            num_features=num_invariant_features,
+                            l_max=l_max,
+                        ).squeeze(0)  # Shape: (num_invariant_features,)
+
+                        # Store
+                        start_idx = layer_idx * num_invariant_features
+                        end_idx = (layer_idx + 1) * num_invariant_features
+                        gradients[atom_idx, start_idx:end_idx] = grad_invariants.detach().cpu().numpy()
+
+            return gradients
