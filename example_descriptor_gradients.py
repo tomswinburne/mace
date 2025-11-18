@@ -18,11 +18,16 @@ calc = mace_mp(model="small", device="cpu", default_dtype="float32")
 descriptors = calc.get_descriptors(atoms)
 print(f"Shape: {descriptors.shape}")  # (num_atoms, total_features)
 print(np.abs(descriptors).mean())
-# Get descriptor gradients
+# Get descriptor gradients (default: single axis with uniform weights)
 gradients = calc.get_descriptors_gradients(atoms)
-print(f"Shape: {gradients.shape}")  # (num_atoms, 3, total_features)
+print(f"Shape: {gradients.shape}")  # (1, num_atoms, 3, total_features)
 print(np.abs(gradients).mean())
-# With custom weights
-weight_vector = np.array([2.0, 1.0, 1.0])
-gradients_weighted = calc.get_descriptors_gradients(atoms, weight_vector=weight_vector)
-print(f"Weighted shape: {gradients_weighted.shape}")  # (num_atoms, 3, total_features)
+
+# With custom weight tensor for multiple axes
+weight_tensor = np.array([
+    [2.0, 1.0, 1.0],  # Axis 0: weight oxygen more
+    [1.0, 2.0, 1.0],  # Axis 1: weight first hydrogen more
+])
+gradients_weighted = calc.get_descriptors_gradients(atoms, weight_tensor=weight_tensor)
+print(f"Weighted shape: {gradients_weighted.shape}")  # (2, num_atoms, 3, total_features)
+print(np.abs(gradients_weighted).mean())

@@ -863,22 +863,27 @@ def test_calculator_descriptor_gradients(fitting_configs, trained_equivariant_mo
 
     # Test 1: Basic shape and default behavior
     grads = calc.get_descriptors_gradients(at)
-    assert grads.shape[0] == len(at)  # num_atoms
-    assert grads.shape[1] == 3  # spatial dimensions
-    assert grads.shape[2] == 32  # total_features (2 layers * 16 features)
+    assert grads.shape[0] == 1  # num_axes (default single axis)
+    assert grads.shape[1] == len(at)  # num_atoms
+    assert grads.shape[2] == 3  # spatial dimensions
+    assert grads.shape[3] == 32  # total_features (2 layers * 16 features)
 
-    # Test 2: Custom weight vector
-    weight_vector = np.random.rand(len(at))
-    grads_weighted = calc.get_descriptors_gradients(at, weight_vector=weight_vector)
-    assert grads_weighted.shape == grads.shape
+    # Test 2: Custom weight tensor
+    weight_tensor = np.random.rand(2, len(at))  # 2 axes
+    grads_weighted = calc.get_descriptors_gradients(at, weight_tensor=weight_tensor)
+    assert grads_weighted.shape[0] == 2  # num_axes
+    assert grads_weighted.shape[1] == len(at)  # num_atoms
+    assert grads_weighted.shape[2] == 3  # spatial dimensions
+    assert grads_weighted.shape[3] == 32  # total_features
     # Should be different from uniform weights
-    assert not np.allclose(grads, grads_weighted)
+    assert not np.allclose(grads[0], grads_weighted[0])
 
     # Test 3: Single layer
     grads_single_layer = calc.get_descriptors_gradients(at, num_layers=1)
-    assert grads_single_layer.shape[0] == len(at)
-    assert grads_single_layer.shape[1] == 3
-    assert grads_single_layer.shape[2] == 16  # 1 layer * 16 features
+    assert grads_single_layer.shape[0] == 1  # num_axes
+    assert grads_single_layer.shape[1] == len(at)  # num_atoms
+    assert grads_single_layer.shape[2] == 3  # spatial dimensions
+    assert grads_single_layer.shape[3] == 16  # 1 layer * 16 features
 
     # Test 4: Numerical gradient check
     eps = 1e-5
@@ -905,8 +910,8 @@ def test_calculator_descriptor_gradients(fitting_configs, trained_equivariant_mo
     numerical_grad = (weighted_desc_1 - weighted_desc_0) / eps
     numerical_grad_flat = numerical_grad.flatten()
 
-    # Analytical gradient
-    analytical_grad_flat = grads[atom_idx, coord_idx, :]
+    # Analytical gradient (extract from first axis of default single-axis result)
+    analytical_grad_flat = grads[0, atom_idx, coord_idx, :]
 
     # Check agreement
     np.testing.assert_allclose(

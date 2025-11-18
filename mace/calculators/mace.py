@@ -612,14 +612,14 @@ class MACECalculator(Calculator):
         return descriptors
 
     def get_descriptors_gradients(
-        self, atoms=None, weight_vector=None, num_layers=-1, use_finite_diff=False
+        self, atoms=None, weight_tensor=None, num_layers=-1, use_finite_diff=False
     ):
         """Extracts the spatial gradients of weighted descriptors from MACE model.
         :param atoms: ase.Atoms object
-        :param weight_vector: np.ndarray of shape (num_atoms,), weights for each atom. If None, defaults to ones.
+        :param weight_tensor: np.ndarray of shape (num_axes, num_atoms), weights for each atom along different axes. If None, defaults to ones with shape (1, num_atoms).
         :param num_layers: int, number of layers to extract descriptors from, if -1 all layers are used
         :param use_finite_diff: bool, if True use finite differences instead of autograd (slower but more robust)
-        :return: np.ndarray of shape (num_atoms, 3, total_features) where total_features = num_layers * num_invariant_features, containing spatial gradients of the weighted descriptor sum
+        :return: np.ndarray of shape (num_axes, num_atoms, 3, total_features) where total_features = num_layers * num_invariant_features, containing spatial gradients of the weighted descriptor sum for each axis
         """
         if atoms is None and self.atoms is None:
             raise ValueError("atoms not set")
@@ -633,14 +633,19 @@ class MACECalculator(Calculator):
             )
 
         num_atoms = len(atoms)
-        if weight_vector is None:
-            weight_vector = np.ones(num_atoms)
+        if weight_tensor is None:
+            weight_tensor = np.ones((1, num_atoms))
         else:
-            weight_vector = np.asarray(weight_vector)
-            if weight_vector.shape != (num_atoms,):
+            weight_tensor = np.asarray(weight_tensor)
+            if weight_tensor.ndim == 1:
+                # Backward compatibility: if 1D array provided, reshape to (1, num_atoms)
+                weight_tensor = weight_tensor.reshape(1, -1)
+            if weight_tensor.ndim != 2 or weight_tensor.shape[1] != num_atoms:
                 raise ValueError(
-                    f"weight_vector must have shape ({num_atoms},), got {weight_vector.shape}"
+                    f"weight_tensor must have shape (num_axes, {num_atoms}), got {weight_tensor.shape}"
                 )
+
+        num_axes = weight_tensor.shape[0]
 
         # Get model metadata to understand descriptor structure
         num_interactions = int(self.models[0].num_interactions)
@@ -657,12 +662,13 @@ class MACECalculator(Calculator):
         # Reshape to (num_atoms, num_layers, num_invariant_features)
         descriptors_0 = descriptors_0_flat.reshape(num_atoms, num_layers, num_invariant_features)
 
-        # Compute weighted descriptors at current position - shape: (num_layers, num_invariant_features)
-        weighted_desc_0 = (weight_vector[:, None, None] * descriptors_0).sum(axis=0)
+        # Compute weighted descriptors at current position for each axis
+        # shape: (num_axes, num_layers, num_invariant_features)
+        weighted_desc_0 = np.einsum('ai,ijk->ajk', weight_tensor, descriptors_0)
 
         # Initialize gradient storage
         total_features = num_layers * num_invariant_features
-        gradients = np.zeros((num_atoms, 3, total_features))
+        gradients = np.zeros((num_axes, num_atoms, 3, total_features))
 
         # Use finite differences
         eps = 1e-6
@@ -679,11 +685,15 @@ class MACECalculator(Calculator):
                     atoms_pert, invariants_only=True, num_layers=num_layers
                 )
                 descriptors_pert = descriptors_pert_flat.reshape(num_atoms, num_layers, num_invariant_features)
-                weighted_desc_pert = (weight_vector[:, None, None] * descriptors_pert).sum(axis=0)
 
-                # Compute finite difference gradient and flatten
-                grad_2d = (weighted_desc_pert - weighted_desc_0) / eps
-                gradients[atom_idx, coord_idx, :] = grad_2d.flatten()
+                # Compute weighted descriptors for all axes
+                # shape: (num_axes, num_layers, num_invariant_features)
+                weighted_desc_pert = np.einsum('ai,ijk->ajk', weight_tensor, descriptors_pert)
+
+                # Compute finite difference gradient and flatten for each axis
+                for axis_idx in range(num_axes):
+                    grad_2d = (weighted_desc_pert[axis_idx] - weighted_desc_0[axis_idx]) / eps
+                    gradients[axis_idx, atom_idx, coord_idx, :] = grad_2d.flatten()
 
         return gradients
 
