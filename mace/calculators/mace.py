@@ -656,44 +656,112 @@ class MACECalculator(Calculator):
         l_max = irreps_out.lmax
         num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
 
-        # Get descriptors at current position - shape: (num_atoms, total_features)
-        descriptors_0_flat = self.get_descriptors(atoms, invariants_only=True, num_layers=num_layers)
-
-        # Reshape to (num_atoms, num_layers, num_invariant_features)
-        descriptors_0 = descriptors_0_flat.reshape(num_atoms, num_layers, num_invariant_features)
-
-        # Compute weighted descriptors at current position for each axis
-        # shape: (num_axes, num_layers, num_invariant_features)
-        weighted_desc_0 = np.einsum('ai,ijk->ajk', weight_tensor, descriptors_0)
-
         # Initialize gradient storage
         total_features = num_layers * num_invariant_features
         gradients = np.zeros((num_axes, num_atoms, 3, total_features))
 
-        # Use finite differences
-        eps = 1e-6
-        for atom_idx in range(num_atoms):
-            for coord_idx in range(3):
-                # Perturb position
-                atoms_pert = atoms.copy()
-                pos = atoms_pert.positions.copy()
-                pos[atom_idx, coord_idx] += eps
-                atoms_pert.positions = pos
+        if use_finite_diff:
+            # Fallback to finite differences if autograd fails
+            # Get descriptors at current position - shape: (num_atoms, total_features)
+            descriptors_0_flat = self.get_descriptors(atoms, invariants_only=True, num_layers=num_layers)
+            descriptors_0 = descriptors_0_flat.reshape(num_atoms, num_layers, num_invariant_features)
+            weighted_desc_0 = np.einsum('ai,ijk->ajk', weight_tensor, descriptors_0)
 
-                # Get descriptors at perturbed position
-                descriptors_pert_flat = self.get_descriptors(
-                    atoms_pert, invariants_only=True, num_layers=num_layers
-                )
-                descriptors_pert = descriptors_pert_flat.reshape(num_atoms, num_layers, num_invariant_features)
+            eps = 1e-6
+            for atom_idx in range(num_atoms):
+                for coord_idx in range(3):
+                    atoms_pert = atoms.copy()
+                    pos = atoms_pert.positions.copy()
+                    pos[atom_idx, coord_idx] += eps
+                    atoms_pert.positions = pos
 
-                # Compute weighted descriptors for all axes
-                # shape: (num_axes, num_layers, num_invariant_features)
-                weighted_desc_pert = np.einsum('ai,ijk->ajk', weight_tensor, descriptors_pert)
+                    descriptors_pert_flat = self.get_descriptors(
+                        atoms_pert, invariants_only=True, num_layers=num_layers
+                    )
+                    descriptors_pert = descriptors_pert_flat.reshape(num_atoms, num_layers, num_invariant_features)
+                    weighted_desc_pert = np.einsum('ai,ijk->ajk', weight_tensor, descriptors_pert)
 
-                # Compute finite difference gradient and flatten for each axis
-                for axis_idx in range(num_axes):
-                    grad_2d = (weighted_desc_pert[axis_idx] - weighted_desc_0[axis_idx]) / eps
-                    gradients[axis_idx, atom_idx, coord_idx, :] = grad_2d.flatten()
+                    for axis_idx in range(num_axes):
+                        grad_2d = (weighted_desc_pert[axis_idx] - weighted_desc_0[axis_idx]) / eps
+                        gradients[axis_idx, atom_idx, coord_idx, :] = grad_2d.flatten()
+        else:
+            # Use autograd through the model
+            import torch
+
+            model = self.models[0]
+            batch = self._atoms_to_batch(atoms)
+
+            # Convert weight_tensor to torch
+            weight_tensor_torch = torch.tensor(
+                weight_tensor, dtype=torch.get_default_dtype(), device=self.device
+            )
+
+            # For each axis and feature, compute gradients
+            # Note: We need a fresh forward pass for each feature to avoid graph issues
+            model.eval()  # Ensure model is in eval mode
+            model.zero_grad()  # Clear any lingering gradients
+
+            for axis_idx in range(num_axes):
+                weights = weight_tensor_torch[axis_idx]  # shape: (num_atoms,)
+
+                for feat_idx in range(total_features):
+                    # Create completely fresh batch for each computation to avoid graph reuse
+                    # Convert everything to numpy and back to ensure NO shared computation graphs
+                    fresh_batch = self._atoms_to_batch(atoms)
+                    fresh_batch_dict = {}
+                    for key, value in fresh_batch.to_dict().items():
+                        if torch.is_tensor(value):
+                            # Go through numpy to completely break any graph connections
+                            numpy_data = value.detach().cpu().numpy()
+                            fresh_batch_dict[key] = torch.tensor(
+                                numpy_data,
+                                dtype=value.dtype,
+                                device=self.device
+                            )
+                        else:
+                            fresh_batch_dict[key] = value
+
+                    # Now set requires_grad on positions
+                    fresh_batch_dict['positions'].requires_grad_(True)
+                    positions = fresh_batch_dict['positions']
+
+                    with torch.enable_grad():
+                        # Forward pass - IMPORTANT: use training=True to avoid graph conflicts
+                        # When training=False, the model internally calls requires_grad_() which conflicts
+                        out = model(fresh_batch_dict, compute_stress=False, training=True)
+                        node_feats_concat = out["node_feats"]
+
+                        # Extract invariant descriptors for each layer
+                        descriptors_list = []
+                        for layer_idx in range(num_layers):
+                            layer_feats = node_feats_concat[:, layer_idx * irreps_out.dim : (layer_idx + 1) * irreps_out.dim]
+                            layer_invariants = extract_invariant(
+                                layer_feats.unsqueeze(0),
+                                num_layers=1,
+                                num_features=num_invariant_features,
+                                l_max=l_max,
+                            ).squeeze(0)
+                            descriptors_list.append(layer_invariants)
+
+                        # Concatenate: (num_atoms, total_features)
+                        descriptors = torch.cat(descriptors_list, dim=1)
+
+                        # Apply weights: sum over atoms -> (total_features,)
+                        weighted_descriptors = (weights.unsqueeze(1) * descriptors).sum(dim=0)
+                        scalar_output = weighted_descriptors[feat_idx]
+
+                        # Compute gradient
+                        grad_output = torch.autograd.grad(
+                            scalar_output,
+                            positions,
+                            create_graph=False,
+                        )[0]  # (num_atoms, 3)
+
+                        gradients[axis_idx, :, :, feat_idx] = grad_output.detach().cpu().numpy()
+
+                    # Clean up
+                    del positions, out, node_feats_concat, descriptors_list, descriptors, weighted_descriptors, scalar_output, grad_output
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
         return gradients
 
@@ -737,10 +805,30 @@ class MACECalculator(Calculator):
         all_linear = all(hasattr(readout, 'linear') and not hasattr(readout, 'linear_1')
                         for readout in model.readouts[:num_layers])
 
+        # Get scale factors from scale_shift block
+        scale_shift = model.scale_shift
+        if hasattr(scale_shift, 'scale'):
+            scales = scale_shift.scale.detach().cpu().numpy()
+        else:
+            scales = np.ones(1)
+
         if all_linear:
             # Analytical gradient: for linear readouts, dE/dD is just the readout weights
-            # For E = sum_i sum_j w_j * D_ij, we have dE/dD_ij = w_j
+            # times the scale factor from scale_shift
+            # For E = scale * (sum_i sum_j w_j * D_ij) + shift, we have dE/dD_ij = scale * w_j
             gradients = np.zeros((num_atoms, total_features))
+
+            # Get node_heads to determine which scale to use for each atom
+            batch = self._atoms_to_batch(atoms)
+            with torch.no_grad():
+                out_base = model(batch.to_dict(), compute_stress=False, training=False)
+
+            if 'node_heads' in out_base:
+                node_heads = out_base['node_heads'].cpu().numpy()
+            elif hasattr(batch, 'heads'):
+                node_heads = batch.heads.cpu().numpy()
+            else:
+                node_heads = np.zeros(num_atoms, dtype=np.int64)
 
             for layer_idx in range(num_layers):
                 if layer_idx < len(model.readouts):
@@ -757,14 +845,17 @@ class MACECalculator(Calculator):
 
                     if weight.shape[1] == num_invariant_features:
                         # Direct match - weight operates on invariant features
-                        # Broadcast to all atoms
-                        gradients[:, start_idx:end_idx] = np.tile(weight[0:1, :], (num_atoms, 1))
+                        # Apply readout weights and scale factor per atom
+                        for atom_idx in range(num_atoms):
+                            head = node_heads[atom_idx]
+                            scale = scales[head] if len(scales) > 1 else scales[0]
+                            gradients[atom_idx, start_idx:end_idx] = scale * weight[head, :]
                     else:
                         # Weight operates on full irreps - need to extract invariant part
-                        # For now, assume first num_invariant_features columns
-                        gradients[:, start_idx:end_idx] = np.tile(
-                            weight[0:1, :num_invariant_features], (num_atoms, 1)
-                        )
+                        for atom_idx in range(num_atoms):
+                            head = node_heads[atom_idx]
+                            scale = scales[head] if len(scales) > 1 else scales[0]
+                            gradients[atom_idx, start_idx:end_idx] = scale * weight[head, :num_invariant_features]
 
             return gradients
 
@@ -899,25 +990,42 @@ class MACECalculator(Calculator):
             # For atom i: E_i = readout(descriptors_i)
             # So dE/dD_i = d(readout)/dD_i
 
+            # Get node_heads
+            batch = self._atoms_to_batch(atoms)
+
+            # Check if heads are in batch
+            if hasattr(batch, 'heads'):
+                node_heads = batch.heads
+            else:
+                # Try to get from a forward pass (but we need to be careful about gradients)
+                with torch.no_grad():
+                    try:
+                        out_base = model(batch.to_dict(), compute_stress=False, training=False)
+                        if 'node_heads' in out_base:
+                            node_heads = out_base['node_heads']
+                        else:
+                            node_heads = torch.zeros(num_atoms, dtype=torch.long, device=self.device)
+                    except:
+                        # If model call fails, assume single head
+                        node_heads = torch.zeros(num_atoms, dtype=torch.long, device=self.device)
+
+            # Get scale factors - these are applied to the SUM of all readout energies
+            scale_shift = model.scale_shift
+            if hasattr(scale_shift, 'scale'):
+                scales = scale_shift.scale.detach().cpu().numpy()
+            else:
+                scales = np.ones(1)
+
             for layer_idx in range(num_layers):
                 readout = model.readouts[layer_idx]
 
-                # Create a dummy input with gradients enabled
                 # We'll compute the jacobian of the readout for each atom
-
                 with torch.enable_grad():
                     # Get the descriptors for this layer
-                    out_base = model(batch.to_dict(), compute_stress=False, training=False)
-                    node_feats_concat = out_base["node_feats"]
+                    # IMPORTANT: use training=True to avoid graph conflicts
+                    out_fresh = model(batch.to_dict(), compute_stress=False, training=True)
+                    node_feats_concat = out_fresh["node_feats"]
                     layer_feats = node_feats_concat[:, layer_idx * irreps_out.dim : (layer_idx + 1) * irreps_out.dim]
-
-                    # Get heads info
-                    if 'node_heads' in out_base:
-                        node_heads = out_base['node_heads']
-                    elif hasattr(batch, 'heads'):
-                        node_heads = batch.heads
-                    else:
-                        node_heads = torch.zeros(num_atoms, dtype=torch.long, device=layer_feats.device)
 
                     # For each atom, compute gradient of its energy w.r.t. its descriptors
                     for atom_idx in range(num_atoms):
@@ -925,14 +1033,14 @@ class MACECalculator(Calculator):
                         atom_feats = layer_feats[atom_idx:atom_idx+1].clone().detach().requires_grad_(True)
                         atom_head = node_heads[atom_idx:atom_idx+1]
 
-                        # Apply readout
+                        # Apply readout (without scale_shift - that's applied to the sum of all readouts)
                         atom_energy = readout(atom_feats, atom_head)
                         if atom_energy.dim() > 1:
                             atom_energy = atom_energy[0, atom_head[0]]
                         else:
                             atom_energy = atom_energy[0]
 
-                        # Compute gradient
+                        # Compute gradient w.r.t. features
                         grad_feats = torch.autograd.grad(
                             atom_energy,
                             atom_feats,
@@ -940,8 +1048,6 @@ class MACECalculator(Calculator):
                         )[0]  # Shape: (1, full_irreps_dim)
 
                         # Extract invariant part
-                        # The invariants are at specific indices in the irreps structure
-                        # For a standard irreps like "128x0e + 128x1o + ...", the first 128 are invariants
                         grad_invariants = extract_invariant(
                             grad_feats,
                             num_layers=1,
@@ -949,9 +1055,16 @@ class MACECalculator(Calculator):
                             l_max=l_max,
                         ).squeeze(0)  # Shape: (num_invariant_features,)
 
+                        # Apply scale factor (scale_shift is applied to SUM of all readouts)
+                        head_val = atom_head[0].item()
+                        if scales.ndim > 0 and scales.shape[0] > 1:
+                            scale = scales[head_val]
+                        else:
+                            scale = scales.item() if scales.ndim == 0 else scales[0]
+
                         # Store
                         start_idx = layer_idx * num_invariant_features
                         end_idx = (layer_idx + 1) * num_invariant_features
-                        gradients[atom_idx, start_idx:end_idx] = grad_invariants.detach().cpu().numpy()
+                        gradients[atom_idx, start_idx:end_idx] = (scale * grad_invariants).detach().cpu().numpy()
 
             return gradients
