@@ -622,3 +622,70 @@ class MACECalculator(Calculator):
         if self.num_models == 1:
             return descriptors[0]
         return descriptors
+
+    def get_descriptor_gradient(self, atoms=None, v=None, invariants_only=True, num_layers=-1):
+        """Compute the spatial gradient dS/dX of the weighted descriptor sum
+        S(X, v) = sum_i v_i D_i(X), where D_i is the descriptor vector for atom i
+        (matching the output of get_descriptors with the same invariants_only/num_layers).
+
+        S is a vector of shape (d_features,); the returned gradient dS/dX has shape
+        (d_features, N_atoms, 3) and is computed via torch autodiff (d_features reverse-mode
+        passes through the model).
+
+        :param atoms: ase.Atoms object
+        :param v: array-like of shape (N_atoms,), per-atom scalar weights
+        :param invariants_only: bool, if True only invariant descriptors are used (default True)
+        :param num_layers: int, number of layers to use; -1 for all layers
+        :return: np.ndarray of shape (d_features, N_atoms, 3) if num_models==1, else list thereof
+        """
+        if atoms is None and self.atoms is None:
+            raise ValueError("atoms not set")
+        if atoms is None:
+            atoms = self.atoms
+        if self.model_type != "MACE":
+            raise NotImplementedError("Only implemented for MACE models")
+
+        num_interactions = int(self.models[0].num_interactions)
+        if num_layers == -1:
+            num_layers = num_interactions
+
+        irreps_out = o3.Irreps(str(self.models[0].products[0].linear.irreps_out))
+        l_max = irreps_out.lmax
+        num_invariant_features = irreps_out.dim // (l_max + 1) ** 2
+        per_layer_features = [irreps_out.dim for _ in range(num_interactions)]
+        per_layer_features[-1] = num_invariant_features
+        to_keep = int(np.sum(per_layer_features[:num_layers]))
+
+        dtype = next(self.models[0].parameters()).dtype
+        batch_base = self._atoms_to_batch(atoms)
+        v_tensor = torch.as_tensor(v, dtype=dtype, device=self.device)  # (N_atoms,)
+
+        gradients = []
+        for model in self.models:
+            batch_dict = batch_base.clone().to_dict()
+            positions = batch_dict["positions"].detach().clone()
+
+            # Capture loop variables by value via default arguments
+            def compute_S(pos, _bd=batch_dict, _model=model):
+                bd = dict(_bd)
+                bd["positions"] = pos
+                node_feats = _model(bd, compute_force=False)["node_feats"]
+                if invariants_only:
+                    desc = extract_invariant(
+                        node_feats,
+                        num_layers=num_layers,
+                        num_features=num_invariant_features,
+                        l_max=l_max,
+                    )
+                else:
+                    desc = node_feats[:, :to_keep]
+                # S: (d_features,)
+                return (v_tensor.unsqueeze(1) * desc).sum(dim=0)
+
+            # jac shape: (d_features, N_atoms, 3)
+            jac = torch.autograd.functional.jacobian(compute_S, positions)
+            gradients.append(jac.detach().cpu().numpy())
+
+        if self.num_models == 1:
+            return gradients[0]
+        return gradients

@@ -688,6 +688,47 @@ def test_calculator_descriptor(fitting_configs, trained_equivariant_model):
     assert not np.allclose(desc, desc_rotated, atol=1e-6)
 
 
+def test_calculator_descriptor_gradient(fitting_configs, trained_equivariant_model):
+    at = fitting_configs[2].copy()
+    calc = trained_equivariant_model
+    N = len(at)
+
+    rng = np.random.default_rng(42)
+    v = rng.standard_normal(N)
+
+    grad = calc.get_descriptor_gradient(at, v=v, invariants_only=True)
+
+    # shape: (d_features, N_atoms, 3)
+    desc = calc.get_descriptors(at, invariants_only=True)
+    d_features = desc.shape[1]
+    assert grad.shape == (d_features, N, 3)
+
+    # Finite-difference check via a random projection w ∈ R^d.
+    # L(X) = w · S(X, v) is scalar; dL/dX = w · (dS/dX), one central-FD per DOF.
+    w = rng.standard_normal(d_features)
+    dL_analytical = np.einsum("k,kia->ia", w, grad)  # (N, 3)
+
+    eps = 1e-4
+    dL_fd = np.zeros((N, 3))
+    for i in range(N):
+        for alpha in range(3):
+            pos_plus = at.positions.copy()
+            pos_plus[i, alpha] += eps
+            at_plus = at.copy()
+            at_plus.positions = pos_plus
+            S_plus = v @ calc.get_descriptors(at_plus, invariants_only=True)
+
+            pos_minus = at.positions.copy()
+            pos_minus[i, alpha] -= eps
+            at_minus = at.copy()
+            at_minus.positions = pos_minus
+            S_minus = v @ calc.get_descriptors(at_minus, invariants_only=True)
+
+            dL_fd[i, alpha] = w @ (S_plus - S_minus) / (2 * eps)
+
+    np.testing.assert_allclose(dL_analytical, dL_fd, rtol=1e-2, atol=1e-4)
+
+
 @pytest.mark.skipif(not CUET_AVAILABLE, reason="cuequivariance not installed")
 def test_calculator_descriptor_cueq(fitting_configs, trained_equivariant_model_cueq):
     at = fitting_configs[2].copy()
